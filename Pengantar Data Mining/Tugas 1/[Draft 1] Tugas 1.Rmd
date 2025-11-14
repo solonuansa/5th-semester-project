@@ -1,0 +1,361 @@
+---
+title: "Praktikum Evaluasi Model Data Mining"
+author: "Program Studi Statistika"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Import Library
+```{r import-library}
+library(tidyverse)
+library(readxl)
+library(gridExtra)
+library(corrplot)
+library(caTools)
+library(caret)       
+library(MLmetrics)
+library(class)
+library(rpart)
+library(rpart.plot)
+library(DT)          
+library(skimr)
+library(knitr)       
+library(kableExtra)
+library(tibble)
+library(ggplot2)
+library(gridExtra)
+```
+
+# Helper
+```{r helpers}
+get_metrics <- function(actual, predicted, model_name, split_name) {
+  cm <- caret::confusionMatrix(predicted, actual, positive = "Yes")
+  acc <- cm$overall["Accuracy"]
+  recall <- cm$byClass["Recall"]
+  precision <- ifelse(!is.na(cm$byClass["Precision"]),
+                      cm$byClass["Precision"], cm$byClass["Pos Pred Value"])
+  f1 <- ifelse(!is.na(cm$byClass["F1"]),
+               cm$byClass["F1"],
+               2 * precision * recall / (precision + recall))
+  data.frame(Model = model_name,
+             Split = split_name,
+             Accuracy = round(acc,4),
+             Recall = round(recall,4),
+             Precision = round(precision,4),
+             F1_Score = round(f1,4))
+}
+```
+
+# Data
+## Data Loading
+```{r data-loading}
+set.seed(123)
+
+data <- read_excel("dataset.xlsx")
+
+DT::datatable(
+  head(data, 20),
+  options = list(pageLength = 10, scrollX = TRUE),
+  caption = "Sampel Data"
+)
+```
+
+## EDA (Exploratory Data Analysis)
+```{r EDA}
+type_info <- tibble(
+  Variabel = names(data),
+  Tipe     = sapply(data, function(x) class(x)[1]),
+  N_NA     = sapply(data, function(x) sum(is.na(x))),
+  Prop_NA  = round(sapply(data, function(x) mean(is.na(x))), 4)
+)
+DT::datatable(type_info, options = list(pageLength = 15, scrollX = TRUE),
+              caption = "Struktur, Jumlah & Proporsi NA per Variabel")
+
+skimr::skim(data)
+```
+```{r}
+# Buat plot 
+p1 <- ggplot(data, aes(x = factor(`Gallstone Status`))) + 
+  geom_bar(fill = "lightblue", color = "black") + 
+  labs(title = "Gallstone Status", x = "Gallstone Status", y = "Count") +
+  theme_minimal()
+
+p2 <- ggplot(data, aes(x = Age)) + 
+  geom_histogram(fill = "lightblue", color = "black") + 
+  labs(title = "Age", x = "Age", y = "Count") +
+  theme_minimal()
+
+p3 <- ggplot(data, aes(x = `Lean Mass (LM) (%)`)) + 
+  geom_histogram(fill = "lightblue", color = "black") + 
+  labs(title = "Lean Mass (LM) (%)", x = "LM (%)", y = "Count") +
+  theme_minimal()
+
+p4 <- ggplot(data, aes(x = `Glomerular Filtration Rate (GFR)`)) + 
+  geom_histogram(fill = "lightblue", color = "black") + 
+  labs(title = "GFR", x = "GFR", y = "Count") +
+  theme_minimal()
+
+p5 <- ggplot(data, aes(x = `C-Reactive Protein (CRP)`)) + 
+  geom_histogram(fill = "lightblue", color = "black") + 
+  labs(title = "CRP", x = "CRP", y = "Count") +
+  theme_minimal()
+
+p6 <- ggplot(data, aes(x = `Vitamin D`)) + 
+  geom_histogram(fill = "lightblue", color = "black") + 
+  labs(title = "Vitamin D", x = "Vitamin D", y = "Count") +
+  theme_minimal()
+
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 2)
+```
+
+## Pengecekan Tipe Data
+```{r}
+data$`Gallstone Status` <- as.factor(data$`Gallstone Status`)
+data$`Hepatic Fat Accumulation (HFA)` <- as.factor(data$`Hepatic Fat Accumulation (HFA)`)
+data$Gender <- as.factor(data$Gender)
+data$Comorbidity <- as.factor(data$Comorbidity)
+data$`Coronary Artery Disease (CAD)` <- as.factor(data$`Coronary Artery Disease (CAD)`)
+data$Hypothyroidism <- as.factor(data$Hypothyroidism)
+data$Hyperlipidemia <- as.factor(data$Hyperlipidemia)
+data$`Diabetes Mellitus (DM)` <- as.factor(data$`Diabetes Mellitus (DM)`)
+
+str(data)
+```
+
+## Missing Values
+```{r Missing-Values}
+missing_tbl <- tibble(
+  Variabel = names(data),
+  N_Missing = sapply(data, function(x) sum(is.na(x)))
+) %>% arrange(desc(N_Missing))
+
+DT::datatable(missing_tbl, options = list(pageLength = 20, scrollX = TRUE),
+              caption = "Jumlah Missing per Variabel")
+total_missing <- sum(missing_tbl$N_Missing)
+cat(sprintf("\nTotal Missing Values di Dataset: %d\n", total_missing))
+```
+
+```{r}
+na_summary <- data.frame(
+  Variabel = names(data),
+  Jumlah_NA = colSums(is.na(data))
+) %>%
+  filter(Jumlah_NA > 0) %>%
+  arrange(desc(Jumlah_NA))
+
+kable(na_summary, caption = "Jumlah Missing Value per Variabel", align = "lc")
+sum(is.na(data))
+```
+
+## Duplikasi
+```{r Duplikasi}
+n_rows <- nrow(data)
+dup_flags <- duplicated(data)
+n_dups <- sum(dup_flags)
+cat(sprintf("\nDeteksi duplikasi: %d baris duplikat dari %d baris.\n", n_dups, n_rows))
+```
+
+## Visualisasi
+```{r visualisasi-data, fig.width=7, fig.height=4}
+ggplot(data, aes(x = `Gallstone Status`)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Distribusi Kelas Target", x = "Kelas (0/1)", y = "Jumlah") +
+  theme_minimal()
+```
+
+```{r histogram-satu-persatu, fig.width=7, fig.height=4}
+# numeric_vars_hist <- data %>% dplyr::select(where(is.numeric)) %>% names()
+# numeric_vars_hist <- setdiff(numeric_vars_hist, "Gallstone Status")
+
+# for (var in numeric_vars_hist) {
+#   p <- ggplot(data, aes(x = .data[[var]])) +
+#     geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+#     labs(title = paste("Distribusi Variabel:", var), x = var, y = "Frekuensi") +
+#     theme_minimal(base_size = 14)
+#   print(p)
+# }
+```
+
+## Korelasi
+```{r korelasi, fig.width=70, fig.height=70, include=FALSE}
+#data_corr <- data
+#fitur_only <- data_corr %>%
+##  dplyr::select(-`Gallstone Status`) %>%
+##  dplyr::select(where(is.numeric))
+#
+##f (ncol(fitur_only) >= 2) {
+##  mat_cor <- cor(fitur_only, use = "pairwise.complete.obs")
+#  corrplot(mat_cor,
+#           method = "color",
+#           type = "lower",
+#           order = "hclust",
+#           tl.col = "black",     
+#           tl.srt = 45,          
+#           tl.cex = 4,         
+#           cl.cex = 4,         
+#           addCoef.col = "black",
+#           number.cex = 3.5,    
+#           number.digits = 2,    
+#           col = colorRampPalette(c("darkred", "white", "darkblue"))(200))
+#}
+#
+#korelasi_target <- cor(fitur_only, data_corr$`Gallstone Status`, use = "pairwise.complete.obs")
+#korelasi_target_df <- tibble(
+#  Variabel = rownames(korelasi_target),
+#  Korelasi = as.numeric(korelasi_target[, 1])
+#) %>% dplyr::arrange(dplyr::desc(abs(Korelasi)))
+#
+#DT::datatable(head(korelasi_target_df, 24),
+#              options = list(pageLength = 10, scrollX = TRUE),
+#              caption = "Top-20 Fitur dengan Korelasi Tertinggi (|r|) terhadap Target")
+```
+# Data Splitting
+```{r}
+set.seed(123)
+data_clean <- data %>%
+  dplyr::mutate(`Gallstone Status` = factor(`Gallstone Status`, levels = c(0,1), labels = c("No","Yes")))
+
+idx <- createDataPartition(data_clean$`Gallstone Status`, p = 0.8, list = FALSE)
+train <- data_clean[idx, ]
+test  <- data_clean[-idx, ]
+
+nrow(train)
+nrow(test)
+```
+
+# Data Preprocessing
+```{r preprocessing}
+num_cols_train <- names(train)[sapply(train, is.numeric)]
+sc_train_mat <- scale(train[, num_cols_train, drop = FALSE])
+center_vec   <- attr(sc_train_mat, "scaled:center")
+scale_vec    <- attr(sc_train_mat, "scaled:scale")
+
+train_scaled <- train
+train_scaled[, num_cols_train] <- sc_train_mat
+
+test_scaled <- test
+test_scaled[, num_cols_train] <- scale(test[, num_cols_train, drop = FALSE],
+                                       center = center_vec, scale = scale_vec)
+
+summary(train_scaled[, num_cols_train])
+
+
+summary(test_scaled[, num_cols_train])
+
+prop_tbl <- tibble(
+  Set   = c("Train_No","Train_Yes","Test_No","Test_Yes"),
+  Prop  = c(
+    mean(train_scaled$`Gallstone Status`=="No"),
+    mean(train_scaled$`Gallstone Status`=="Yes"),
+    mean(test_scaled$`Gallstone Status`=="No"),
+    mean(test_scaled$`Gallstone Status`=="Yes")
+  )
+)
+DT::datatable(prop_tbl, options = list(dom='t'),
+              caption = "Proporsi Kelas di Train/Test")
+```
+
+# Pemodelan & Evaluasi
+
+## 1) Decision Tree
+```{r decision-tree, fig.width=7, fig.height=5}
+set.seed(123)
+fit_dt <- rpart(`Gallstone Status` ~ ., data = train_scaled, method = "class")
+
+rpart.plot(fit_dt,
+           type = 2,
+           extra = 104,
+           fallen.leaves = TRUE,
+           tweak = 1,
+           main = "Decision Tree — Gallstone Status")
+
+importance_dt <- as.data.frame(fit_dt$variable.importance) %>%
+  tibble::rownames_to_column("Feature") %>%
+  dplyr::rename(Importance = 2) %>%
+  dplyr::arrange(desc(Importance))
+
+cat("\n=== Feature Importance — Decision Tree")
+print(importance_dt)
+
+ggplot(importance_dt, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Feature Importance — Decision Tree",
+       x = "Fitur", y = "Importance") +
+  theme_minimal(base_size = 12)
+
+pred_dt_train <- predict(fit_dt, newdata = train_scaled, type = "class")
+metrics_dt_train <- get_metrics(train$`Gallstone Status`, pred_dt_train, "Decision Tree", "Train")
+
+pred_dt_test <- predict(fit_dt, newdata = test_scaled, type = "class")
+metrics_dt_test <- get_metrics(test$`Gallstone Status`, pred_dt_test, "Decision Tree", "Test")
+```
+
+## 2) Logistic Regression
+```{r logistic-regression}
+set.seed(123)
+fit_lr <- glm(`Gallstone Status` ~ ., data = train_scaled, family = binomial)
+summary(fit_lr)
+
+pred_lr_train_prob <- predict(fit_lr, newdata = train_scaled, type = "response")
+pred_lr_train <- factor(ifelse(pred_lr_train_prob >= 0.5, "Yes", "No"), levels = c("No","Yes"))
+metrics_lr_train <- get_metrics(train_scaled$`Gallstone Status`, pred_lr_train, "Logistic Regression", "Train")
+
+
+pred_lr_test_prob <- predict(fit_lr, newdata = test_scaled, type = "response")
+pred_lr_test <- factor(ifelse(pred_lr_test_prob >= 0.5, "Yes", "No"), levels = c("No","Yes"))
+metrics_lr_test <- get_metrics(test_scaled$`Gallstone Status`, pred_lr_test, "Logistic Regression", "Test")
+```
+
+## 3) Ensemble 
+
+```{r ensemble}
+set.seed(123)
+
+pred_dt_prob_train <- predict(fit_dt, newdata = train_scaled, type = "prob")[, "Yes"]
+pred_lr_prob_train <- predict(fit_lr, newdata = train_scaled, type = "response")
+pred_ens_train <- factor(ifelse((pred_dt_prob_train + pred_lr_prob_train)/2 >= 0.5, "Yes", "No"),
+                         levels = c("No","Yes"))
+metrics_ens_train <- get_metrics(train_scaled$`Gallstone Status`, pred_ens_train, "Ensemble", "Train")
+
+pred_dt_prob_test <- predict(fit_dt, newdata = test_scaled, type = "prob")[, "Yes"]
+pred_lr_prob_test <- predict(fit_lr, newdata = test_scaled, type = "response")
+pred_ens_test <- factor(ifelse((pred_dt_prob_test + pred_lr_prob_test)/2 >= 0.5, "Yes", "No"),
+                        levels = c("No","Yes"))
+metrics_ens_test <- get_metrics(test_scaled$`Gallstone Status`, pred_ens_test, "Ensemble", "Test")
+```
+
+
+## Ringkasan Perbandingan Model
+```{r ringkasan-model}
+set.seed(123)
+metrics_all <- bind_rows(metrics_dt_train, metrics_dt_test,
+                         metrics_lr_train, metrics_lr_test,
+                         metrics_ens_train, metrics_ens_test)
+
+rownames(metrics_all) <- NULL
+
+metrics_all %>%
+  kable(align = "c", booktabs = TRUE, caption = "Perbandingan Metrik Model (Train & Test)") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+metrics_all %>%
+  tidyr::pivot_longer(cols = c(Accuracy, Recall, Precision, F1_Score),
+                      names_to = "Metric", values_to = "Value") %>%
+  ggplot(aes(x = Model, y = Value, fill = Split)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ Metric, scales = "free_y") +
+  labs(title = "Perbandingan Metrik Antar Model",
+       x = "Model", y = "Nilai Metrik") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
